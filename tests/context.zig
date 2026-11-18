@@ -85,13 +85,17 @@ pub const Context = struct {
         source: []const u8,
         mode: std.zig.Ast.Mode = .zig,
         base_directory: []const u8 = "/",
+        /// 设置后使用该文件系统路径打开文档，而不是生成 `untitled:` uri。
+        path: ?[]const u8 = null,
     }) !zls.Uri {
         std.debug.assert(std.mem.startsWith(u8, options.base_directory, "/"));
         std.debug.assert(std.mem.endsWith(u8, options.base_directory, "/"));
 
         const arena = self.arena.allocator();
-        const path = try arena.print("untitled://{s}Untitled-{d}.{t}", .{ options.base_directory, self.file_id, options.mode });
-        const uri: zls.Uri = try .parse(arena, path);
+        const uri: zls.Uri = if (options.path) |path|
+            try .fromPath(arena, path)
+        else
+            try .parse(arena, try arena.print("untitled://{s}Untitled-{d}.{t}", .{ options.base_directory, self.file_id, options.mode }));
 
         const params: types.TextDocument.DidOpenParams = .{
             .textDocument = .{

@@ -4766,6 +4766,36 @@ test "insert replace behaviour - file system completions" {
     // zig fmt: on
 }
 
+test "file system completions keep existing .zig extension" {
+    if (@import("builtin").target.cpu.arch.isWasm()) return error.SkipZigTest;
+
+    var tmp_dir = std.testing.tmpDir(.{});
+    defer tmp_dir.cleanup();
+
+    try tmp_dir.dir.writeFile(std.testing.io, .{ .sub_path = "file.zig", .data = "" });
+
+    const dir_path = try tmp_dir.dir.realPathFileAlloc(std.testing.io, ".", allocator);
+    defer allocator.free(dir_path);
+
+    const document_path = try std.Io.Dir.path.join(allocator, &.{ dir_path, "main.zig" });
+    defer allocator.free(document_path);
+
+    // 光标位于扩展名之前，补全不应再次插入扩展名。
+    try testCompletionTextEdit(.{
+        .source =
+        \\const std = @import("file<cursor>.zig");
+        ,
+        .label = "file.zig",
+        .expected_insert_line =
+        \\const std = @import("file.zig");
+        ,
+        .expected_replace_line =
+        \\const std = @import("file.zig");
+        ,
+        .path = document_path,
+    });
+}
+
 test "insert replace behaviour - expression inside parens/braces/brackets" {
     try testCompletionTextEdit(.{
         .source =
@@ -5198,6 +5228,8 @@ fn testCompletionTextEdit(
 
         enable_argument_placeholders: bool = false,
         enable_snippets: bool = false,
+        /// 设置后使用该文件系统路径打开文档，而不是生成 `untitled:` uri。
+        path: ?[]const u8 = null,
     },
 ) !void {
     const cursor_idx = std.mem.find(u8, options.source, "<cursor>").?;
@@ -5221,7 +5253,7 @@ fn testCompletionTextEdit(
     ctx.server.config_manager.config.enable_argument_placeholders = options.enable_argument_placeholders;
     ctx.server.config_manager.config.enable_snippets = options.enable_snippets;
 
-    const test_uri = try ctx.addDocument(.{ .source = text });
+    const test_uri = try ctx.addDocument(.{ .source = text, .path = options.path });
 
     const cursor_position = offsets.indexToPosition(options.source, cursor_idx, ctx.server.offset_encoding);
     const params: types.completion.Params = .{

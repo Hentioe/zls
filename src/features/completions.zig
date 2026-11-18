@@ -897,6 +897,18 @@ fn completeFileSystemStringLiteral(builder: *Builder, pos_context: Analyser.Posi
     const insert_range = offsets.locToRange(source, insert_loc, builder.server.offset_encoding);
     const replace_range = offsets.locToRange(source, replace_loc, builder.server.offset_encoding);
 
+    // 光标到当前路径段末尾之间的文本。
+    // 用于判断扩展名是否已经在光标后面，例如
+    // `@import("fo|o.zig")` 中实际只编辑了 `foo`。
+    const segment_rest = source[builder.source_index .. next_separator_index orelse string_content_loc.end];
+
+    // 用于过滤文件条目的扩展名。
+    const expected_extension: ?[]const u8 = switch (pos_context) {
+        .import_string_literal => ".zig",
+        .embedfile_string_literal, .string_literal => null,
+        else => unreachable,
+    };
+
     if (pos_context == .import_string_literal) {
         try builder.completions.ensureUnusedCapacity(builder.arena, 2);
         if (store.config.zig_lib_dir) |zig_lib_dir| {
@@ -994,12 +1006,6 @@ fn completeFileSystemStringLiteral(builder: *Builder, pos_context: Analyser.Posi
 
         while (it.next(io)) |opt_entry| {
             const entry = opt_entry orelse break;
-            const expected_extension = switch (pos_context) {
-                .import_string_literal => ".zig",
-                .embedfile_string_literal => null,
-                .string_literal => null,
-                else => unreachable,
-            };
             switch (entry.kind) {
                 .file => if (expected_extension) |expected| {
                     const actual_extension = std.Io.Dir.path.extension(entry.name);
@@ -1010,7 +1016,7 @@ fn completeFileSystemStringLiteral(builder: *Builder, pos_context: Analyser.Posi
             }
 
             const label = try builder.arena.dupe(u8, entry.name);
-            const insert_text = if (entry.kind == .directory)
+            var insert_text = if (entry.kind == .directory)
                 if (next_separator_index == null)
                     try builder.arena.print("{s}/", .{entry.name})
                 else
@@ -1018,12 +1024,28 @@ fn completeFileSystemStringLiteral(builder: *Builder, pos_context: Analyser.Posi
             else
                 label;
 
+            // 当光标正好在扩展名之前时（`@import("fo|o.zig")`），
+            // 缓冲区里已经有扩展名。这里只插入文件名，
+            // 否则接受 `foo.zig` 会得到 `foo.zig.zig`。
+            const extension = expected_extension orelse "";
+            const strip_extension = entry.kind == .file and
+                extension.len != 0 and
+                insert_text.len > extension.len and
+                std.mem.eql(u8, segment_rest, extension) and
+                std.mem.endsWith(u8, insert_text, extension);
+
+            if (strip_extension) insert_text = insert_text[0 .. insert_text.len - extension.len];
+
             const score: u4 = if (entry.kind == .file) 6 else 5;
+
+            // replace range 覆盖整个路径段，会连带替换掉我们想保留在缓冲区里的扩展名。
+            // 因此命中时把它的结束位置收到光标处，让 replace 和 insert 行为一致。
+            const entry_replace_range = if (strip_extension) insert_range else replace_range;
 
             try builder.completions.append(builder.arena, .{
                 .label = label,
                 .kind = if (entry.kind == .file) .File else .Folder,
-                .textEdit = createTextEdit(builder, .{ .newText = insert_text, .insert = insert_range, .replace = replace_range }),
+                .textEdit = createTextEdit(builder, .{ .newText = insert_text, .insert = insert_range, .replace = entry_replace_range }),
                 .sortText = try generateSortText(builder.arena, score, label),
             });
         } else |err| switch (err) {
